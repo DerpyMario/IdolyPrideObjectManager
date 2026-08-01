@@ -7,6 +7,13 @@ the manifest is fetched (or loaded) and decrypted by the library,
 and every download goes through the library's deobfuscation and
 media conversion pipeline. No library code is modified.
 
+Offers a full download of the entire manifest, or a selective download
+across fine-grained categories (character models/motions, spine2d SD
+characters, props, showcase goods, NPCs & mascots, maps, effects, cards,
+costumes, hair, accessories, items, gacha/shop art, banners, UI, movies,
+music, voices, story scripts, ...), each optionally filtered by character
+using the library's character database.
+
 Usage:
     python asset_downloader.py                  # fully interactive
     python asset_downloader.py --src octocacheevai
@@ -28,86 +35,248 @@ console = Console()
 
 # Selective download categories, mapped onto the asset naming scheme
 # observed in the decrypted manifest. Each entry is
-# (label, [regex, ...], description); regexes follow PrideManifest.search()
-# semantics (re.match, case-insensitive).
+# (group, label, [regex, ...], description); regexes follow
+# PrideManifest.search() semantics (re.match, case-insensitive).
 CATEGORIES = [
+    # -------- 3D --------
     (
-        "Character 3D models",
+        "3D",
+        "Character models",
         [r"mdl_chr_.*"],
         "character meshes: body / face / hair per costume",
     ),
     (
-        "Character 3D animations (motions)",
+        "3D",
+        "Character motions (animations)",
         [r"mot_.*"],
         "motion data: live stages, adv scenes, photo poses, home idles",
     ),
     (
-        "Character Spine2D (SD) images & animations",
+        "3D",
+        "Props",
+        [r"mdl_prp_.*"],
+        "handheld & stage props (fans, flowers, flyers, ...)",
+    ),
+    (
+        "3D",
+        "Showcase goods (merch)",
+        [r"mdl_shw_.*"],
+        "3D merch models: badges, acrylic boards, ...",
+    ),
+    (
+        "3D",
+        "Other 3D models",
+        [r"mdl_env_.*", r"mdl_oth_.*"],
+        "environment and miscellaneous meshes",
+    ),
+    # -------- Spine2D / SD --------
+    (
+        "Spine2D",
+        "SD characters (spine2d)",
         [r"spi_sd_.*"],
         "chibi skeletons (.skl), atlas layouts (.atlas), and textures",
     ),
     (
+        "Spine2D",
+        "NPCs & mascots",
+        [r"sd_npc.*", r"img_mob_.*"],
+        "SD NPC spines/mascots and NPC/mob portraits",
+    ),
+    # -------- World --------
+    (
+        "World",
         "Maps & environments",
         [r"env_.*", r"scl_.*", r"m_sky.*", r"pfb_panorama.*", r"lok_.*"],
         "stages, rooms, panoramas, skyboxes, scene layouts",
     ),
     (
+        "World",
         "Effects",
         [r"eff_.*", r"efp_.*"],
         "particle systems, flares, cutin/movie effects",
     ),
+    # -------- Images --------
     (
-        "UI",
-        [r"img_ui_.*", r"mov_ui_.*", r"img_icon.*", r"img_banner.*",
-         r"img_loading.*", r"img_tutorial.*", r"img_help.*"],
-        "interface art, icons, banners, loading screens",
-    ),
-    (
-        "Card images",
+        "Images",
+        "Card art",
         [r"img_card_.*"],
-        "character cards (full art and thumbnails)",
+        "character cards: full / rect / upper / thumb",
     ),
     (
-        "Photo & story images",
-        [r"img_photo_.*", r"img_story_.*"],
-        "photo mode shots, story stills and thumbnails",
+        "Images",
+        "Photo art",
+        [r"img_photo_.*"],
+        "photo mode shots",
     ),
     (
+        "Images",
+        "Story art",
+        [r"img_story_.*"],
+        "story stills, episode covers, thumbnails",
+    ),
+    (
+        "Images",
+        "Character portraits & sprites",
+        [r"img_chr_.*"],
+        "portraits, adv sprites, signs, icons per character",
+    ),
+    (
+        "Images",
+        "Costume thumbnails",
+        [r"img_cos_.*"],
+        "costume catalogue thumbnails",
+    ),
+    (
+        "Images",
+        "Hair thumbnails",
+        [r"img_hair_.*"],
+        "hairstyle catalogue thumbnails",
+    ),
+    (
+        "Images",
+        "Accessory thumbnails",
+        [r"img_acc_.*"],
+        "accessory catalogue thumbnails",
+    ),
+    (
+        "Images",
+        "Items, deco & toys",
+        [r"img_item_.*", r"img_deco_.*", r"img_toy_.*", r"img_shelf_.*",
+         r"img_ornament.*"],
+        "item icons, room decorations, toys, shelves",
+    ),
+    (
+        "Images",
+        "Gacha & shop art",
+        [r"img_gacha_.*", r"img_shop_.*", r"img_dokan_.*", r"img_exchange_.*"],
+        "gacha screens/buttons, shop items, exchange art",
+    ),
+    (
+        "Images",
+        "Banners",
+        [r"img_banner_.*"],
+        "event / notice banners (large and small)",
+    ),
+    (
+        "Images",
+        "UI & icons",
+        [r"img_ui_.*", r"img_icon.*", r"img_loading.*", r"img_tutorial.*",
+         r"img_help.*", r"img_message_.*", r"img_music_.*"],
+        "interface art, icons, loading screens, stamps, jackets",
+    ),
+    (
+        "Images",
         "All images",
         [r"img_.*"],
-        "every img_* texture in the manifest (superset of the above img groups)",
+        "every img_* texture (superset of the img groups above)",
+    ),
+    # -------- Video --------
+    (
+        "Video",
+        "Music videos (MVs)",
+        [r"mov_mv.*"],
+        "full music videos (mp4)",
     ),
     (
-        "Other 3D models (props, goods, NPCs)",
-        [r"mdl_prp_.*", r"mdl_shw_.*", r"mdl_env_.*", r"mdl_oth_.*", r"sd_npc.*"],
-        "stage props, showcase merch, environment models, NPC chibis",
+        "Video",
+        "Card & gacha movies",
+        [r"mov_card_.*", r"mov_gacha.*"],
+        "animated cards and gacha movies",
     ),
     (
-        "Movies & MVs",
+        "Video",
+        "All movies",
         [r"mov_.*"],
-        "music videos, animated cards, gacha movies (mp4)",
+        "every mov_* video (superset of the video groups above)",
     ),
+    # -------- Audio --------
     (
-        "Audio: BGM & music",
+        "Audio",
+        "BGM & songs",
         [r"sud_bgm.*", r"sud_music.*"],
         "background music and playable songs",
     ),
     (
-        "Audio: voice lines",
+        "Audio",
+        "Voice lines",
         [r"sud_vo.*"],
-        "character voice clips (largest audio group)",
+        "character voice clips (home, adv, live, phone, ...)",
     ),
     (
-        "Audio: sound effects",
+        "Audio",
+        "Sound effects",
         [r"sud_se.*"],
         "UI and gameplay sound effects",
     ),
+    # -------- Text --------
     (
+        "Text",
         "Story scripts (adventure text)",
         [r"adv_.*"],
         "story/adventure command scripts (.txt)",
     ),
 ]
+
+# "Everything else": objects matching none of the categories above
+# (shaders, live timelines, sun-001 templates, relation tables, ...),
+# expressed as a negative lookahead so it stays a plain regex that
+# PrideManifest.search() understands.
+_KNOWN_UNION = "|".join(
+    f"(?:{p})" for _, _, patterns, _ in CATEGORIES for p in patterns
+)
+CATEGORIES.append(
+    (
+        "Misc",
+        "Everything else",
+        [rf"(?!(?:{_KNOWN_UNION})).*"],
+        "objects not covered by any category above (shaders, timelines, ...)",
+    )
+)
+
+# Character database: abbreviations come from the library itself
+# (IdolyPrideObjectManager.const.CHARACTER_ABBREVS); display names and
+# units below mirror the annotations in that file. Unknown abbreviations
+# added by future library updates still show up, just without a pretty name.
+CHARACTER_NAMES = {
+    "mna": ("Nagase Mana", "Hoshimi Pro"),
+    "ktn": ("Nagase Kotono", "Tsuki no Tempest"),
+    "ngs": ("Ibuki Nagisa", "Tsuki no Tempest"),
+    "ski": ("Shiraishi Saki", "Tsuki no Tempest"),
+    "suz": ("Narumiya Suzu", "Tsuki no Tempest"),
+    "mei": ("Hayasaka Mei", "Tsuki no Tempest"),
+    "skr": ("Kawasaki Sakura", "Sunny Peace"),
+    "szk": ("Hyodo Shizuku", "Sunny Peace"),
+    "chs": ("Shiraishi Chisa", "Sunny Peace"),
+    "rei": ("Ichinose Rei", "Sunny Peace"),
+    "hrk": ("Saeki Haruko", "Sunny Peace"),
+    "rui": ("Tendo Rui", "TRINITYAiLE"),
+    "yu": ("Suzumura Yu", "TRINITYAiLE"),
+    "smr": ("Okuyama Sumire", "TRINITYAiLE"),
+    "rio": ("Kanzaki Rio", "LizNoir"),
+    "aoi": ("Igawa Aoi", "LizNoir"),
+    "ai": ("Komiyama Ai", "LizNoir"),
+    "kkr": ("Akazaki Kokoro", "LizNoir"),
+    "kor": ("Yamada Kaori (fran)", "IIIX"),
+    "kan": ("Kojima Kana", "IIIX"),
+    "mhk": ("Takeda Mihoko", "IIIX"),
+    "mku": ("Hatsune Miku", "Collab"),
+    "ymk": ("Yuki Miku", "Collab"),
+    "chk": ("Takami Chika", "Collab"),
+    "rik": ("Sakurauchi Riko", "Collab"),
+    "yo": ("Watanabe You", "Collab"),
+    "cca": ("Hoto Cocoa", "Collab"),
+    "chn": ("Kafu Chino", "Collab"),
+}
+
+
+def char_token_pattern(abbrevs: list[str]) -> str:
+    """
+    Regex matching a character abbreviation as a delimited token inside
+    an asset name (e.g. 'mna' in 'mdl_chr_mna-fest-10_hair' or 'skr' in
+    'sud_vo_adv_hbd_02_skr005', but not 'ai' inside 'adv_main').
+    """
+    union = "|".join(sorted(abbrevs, key=len, reverse=True))
+    return rf"(?:^|(?<=[-_]))(?:{union})(?=$|[-_.\d])"
 
 IMAGE_FORMATS = ["png", "jpeg", "webp", "bmp", "tiff"]
 AUDIO_FORMATS = ["wav", "mp3", "ogg", "flac"]
@@ -311,30 +480,38 @@ def pick_categories(entries: list[tuple[str, int]]) -> list[str]:
 
     table = Table(title="Asset categories", box=box.ROUNDED)
     table.add_column("#", justify="right", style="cyan")
+    table.add_column("Group", style="magenta")
     table.add_column("Category", style="bold")
     table.add_column("Objects", justify="right")
     table.add_column("Size", justify="right")
     table.add_column("Contents", style="dim")
 
-    stats = []
-    for label, patterns, description in CATEGORIES:
+    previous_group = None
+    for index, (group, label, patterns, description) in enumerate(CATEGORIES, 1):
+        if group != previous_group and previous_group is not None:
+            table.add_section()
         matched = match_entries(entries, patterns)
-        stats.append(matched)
         table.add_row(
-            str(len(stats)),
+            str(index),
+            group if group != previous_group else "",
             label,
             f"{len(matched):,}",
             fmt_size(sum(size for _, size in matched)),
             description,
         )
-    table.add_row(str(len(CATEGORIES) + 1), "Custom regex", "-", "-",
+        previous_group = group
+    table.add_section()
+    table.add_row(str(len(CATEGORIES) + 1), "", "Custom regex", "-", "-",
                   "enter your own name pattern(s)")
     console.print(table)
 
     while True:
-        raw = ask("Select categories (comma-separated, e.g. 1,3,5)")
+        raw = ask("Select categories (comma-separated, e.g. 1,3,5, or 'all')")
         if not raw:
             return []
+
+        if raw.strip().lower() == "all":
+            return [p for _, _, patterns, _ in CATEGORIES for p in patterns]
 
         tokens = [t.strip() for t in raw.split(",") if t.strip()]
         patterns = []
@@ -346,11 +523,61 @@ def pick_categories(entries: list[tuple[str, int]]) -> list[str]:
                 break
             index = int(token) - 1
             if index < len(CATEGORIES):
-                patterns.extend(CATEGORIES[index][1])
+                patterns.extend(CATEGORIES[index][2])
             else:
                 patterns.extend(prompt_custom_patterns(entries))
         if valid:
             return patterns
+
+
+def pick_characters() -> list[str]:
+    """
+    Render the character table (abbreviations from the library's database,
+    display names from CHARACTER_NAMES) and return the chosen abbreviations.
+    Empty selection means "no character filter".
+    """
+
+    from IdolyPrideObjectManager.const import CHARACTER_ABBREVS
+
+    table = Table(title="Characters", box=box.ROUNDED)
+    table.add_column("#", justify="right", style="cyan")
+    table.add_column("Abbrev", style="bold")
+    table.add_column("Name")
+    table.add_column("Unit", style="magenta")
+
+    for index, abbrev in enumerate(CHARACTER_ABBREVS, 1):
+        name, unit = CHARACTER_NAMES.get(abbrev, (abbrev, "?"))
+        table.add_row(str(index), abbrev, name, unit)
+    console.print(table)
+
+    while True:
+        raw = ask("Select characters (numbers, abbrevs, or names; blank = all)")
+        if not raw:
+            return []
+
+        chosen = []
+        valid = True
+        for token in [t.strip().lower() for t in raw.split(",") if t.strip()]:
+            if token.isdigit() and 1 <= int(token) <= len(CHARACTER_ABBREVS):
+                chosen.append(CHARACTER_ABBREVS[int(token) - 1])
+            elif token in CHARACTER_ABBREVS:
+                chosen.append(token)
+            else:
+                by_name = [
+                    abbrev
+                    for abbrev in CHARACTER_ABBREVS
+                    if token in CHARACTER_NAMES.get(abbrev, (abbrev, ""))[0].lower()
+                ]
+                if by_name:
+                    chosen.extend(by_name)  # e.g. 'miku' matches both Mikus
+                else:
+                    console.print(f"[red]Unknown character '{token}'.[/red]")
+                    valid = False
+                    break
+        if valid and chosen:
+            return sorted(set(chosen), key=CHARACTER_ABBREVS.index)
+        if valid:
+            console.print("[yellow]Nothing selected; try again.[/yellow]")
 
 
 def prompt_custom_patterns(entries: list[tuple[str, int]]) -> list[str]:
@@ -388,9 +615,22 @@ def run_selective_download(
         console.print("[dim]Nothing selected.[/dim]")
         return
 
+    if ask_yn("Filter by character?", False):
+        abbrevs = pick_characters()
+        if abbrevs:
+            names = ", ".join(
+                CHARACTER_NAMES.get(a, (a, ""))[0] for a in abbrevs
+            )
+            console.print(f"[dim]Filtering for: {names}[/dim]")
+            lookahead = f"(?=.*{char_token_pattern(abbrevs)})"
+            patterns = [f"{lookahead}(?:{p})" for p in patterns]
+
     matched = match_entries(entries, patterns)
     if not matched:
-        console.print("[yellow]No objects matched the selection.[/yellow]")
+        console.print(
+            "[yellow]No objects matched the selection "
+            "(note: some categories carry no character token in their names).[/yellow]"
+        )
         return
     if not confirm_download(matched):
         console.print("[dim]Cancelled.[/dim]")
@@ -450,7 +690,8 @@ def main():
         console.print(
             Panel(
                 "[1] Full download (everything in the manifest)\n"
-                "[2] Selective download (models, spine2d, maps, effects, ui, ...)\n"
+                "[2] Selective download (models, spine2d, maps, props, npcs,\n"
+                "    accessories, ui, ... — optionally filtered by character)\n"
                 "[3] Export decrypted manifest (JSON / CSV / ProtoDB)\n"
                 "[0] Quit",
                 title="Main menu",
