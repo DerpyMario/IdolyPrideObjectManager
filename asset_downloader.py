@@ -14,15 +14,24 @@ costumes, hair, accessories, items, gacha/shop art, banners, UI, movies,
 music, voices, story scripts, ...), each optionally filtered by character
 using the library's character database.
 
+Manifest maintenance is delegated to update_manifest.py, the script
+merged unmodified from the upstream 'manifest-update' branch: the
+downloader can check the server for a newer revision, build or refresh
+a local manifests/ archive through its do_update(), rebuild the wayback
+object log through its rebuild_log(), and load any archived revision.
+
 Usage:
     python asset_downloader.py                  # fully interactive
     python asset_downloader.py --src octocacheevai
     python asset_downloader.py --revision 900 --output out/
+    python asset_downloader.py --archive manifests/
 """
 
 import argparse
 import re
 import sys
+from pathlib import Path
+from typing import Optional
 
 from rich import box
 from rich.console import Console
@@ -281,6 +290,12 @@ def char_token_pattern(abbrevs: list[str]) -> str:
 IMAGE_FORMATS = ["png", "jpeg", "webp", "bmp", "tiff"]
 AUDIO_FORMATS = ["wav", "mp3", "ogg", "flac"]
 
+# Manifest archive maintained by update_manifest.py, and the revision
+# index that script reads; both come from the upstream 'manifest-update'
+# branch merged into this repository.
+DEFAULT_ARCHIVE_PATH = "manifests"
+WAYBACK_COMMITS_LOCAL = "wayback_commits.json"
+
 
 # ---------------- prompt helpers ---------------- #
 
@@ -321,11 +336,299 @@ def fmt_size(nbytes: int) -> str:
         size /= 1024
 
 
+# ---------------- manifest archive & updates ---------------- #
+# Thin wrappers around update_manifest.py, the maintenance script taken
+# unmodified from the upstream 'manifest-update' branch. It is imported
+# lazily so that the downloader still runs as a standalone script when
+# only the library is present.
+
+
+def load_update_script():
+    """
+    [INTERNAL] Imports update_manifest.py from the working directory.
+    Returns None, with an explanation, if it cannot be imported.
+    """
+
+    try:
+        import update_manifest
+    except ImportError as e:
+        console.print(
+            f"[yellow]update_manifest.py is unavailable ({e}).[/yellow]\n"
+            "[dim]Run the downloader from the repository root, "
+            "with 'tqdm' installed.[/dim]"
+        )
+        return None
+
+    return update_manifest
+
+
+def known_revisions() -> list[int]:
+    """
+    Revisions resolvable through the wayback commit index, preferring the
+    local wayback_commits.json and falling back to the upstream copy.
+    """
+
+    from IdolyPrideObjectManager.const import (
+        WAYBACK_COMMITS_LOG_LOCAL,
+        WAYBACK_COMMITS_LOG_REMOTE,
+    )
+    from IdolyPrideObjectManager.utils import _json_load
+
+    source = (
+        WAYBACK_COMMITS_LOG_LOCAL
+        if Path(WAYBACK_COMMITS_LOG_LOCAL).is_file()
+        else WAYBACK_COMMITS_LOG_REMOTE
+    )
+
+    try:
+        return sorted(int(revision) for revision in _json_load(source))
+    except Exception as e:
+        console.print(f"[yellow]Could not read the wayback commit index: {e}[/yellow]")
+        return []
+
+
+def archive_revisions(archive: Path) -> list[int]:
+    """Revisions present in a local archive exported by update_manifest.py."""
+
+    if not archive.is_dir():
+        return []
+
+    revisions = []
+    for entry in archive.glob("v[0-9][0-9][0-9][0-9].json"):
+        try:
+            revisions.append(int(entry.stem[1:]))
+        except ValueError:
+            continue
+
+    return sorted(revisions)
+
+
+def archive_latest_revision(archive: Path) -> Optional[int]:
+    """The LATEST_REVISION marker maintained by update_manifest.do_update()."""
+
+    try:
+        return int((archive / "LATEST_REVISION").read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def load_from_archive(archive: Path) -> Optional[ipom.PrideManifest]:
+    """
+    Loads one file from the local manifest archive. Note that only
+    v0000.json is a complete manifest; every other vNNNN.json is the diff
+    against revision NNNN, which is exactly what makes it useful here --
+    downloading one selects only the objects changed since that revision.
+    """
+
+    revisions = archive_revisions(archive)
+    if not revisions:
+        console.print(
+            f"[yellow]No manifest archive found at '{archive}'.[/yellow]\n"
+            "[dim]Build one from the main menu: "
+            "Manifest updates -> update the local archive.[/dim]"
+        )
+        return None
+
+    latest = archive_latest_revision(archive)
+    console.print(
+        f"Archive [cyan]{archive}[/cyan]: {len(revisions)} files"
+        + (f", exported at revision [cyan]v{latest}[/cyan]" if latest else "")
+    )
+    console.print(
+        "[dim]v0000.json is the full manifest; every other vNNNN.json holds "
+        "only the objects added or updated since revision NNNN.[/dim]"
+    )
+
+    while True:
+        raw = ask("Revision to load (0 = full manifest, blank = back)", "0")
+        if not raw:
+            return None
+
+        try:
+            revision = int(raw)
+        except ValueError:
+            console.print("[red]Please enter a revision number.[/red]")
+            continue
+
+        if revision not in revisions:
+            console.print(f"[red]v{revision:04d}.json is not in the archive.[/red]")
+            continue
+
+        path = archive / f"v{revision:04d}.json"
+        console.print(f"Loading [cyan]{path}[/cyan] ...")
+        return ipom.load(path)
+
+
+def check_for_update(
+    manifest: ipom.PrideManifest, archive: Path
+) -> Optional[ipom.PrideManifest]:
+    """
+    Compares the server's current revision against what is held locally.
+    This mirrors the check at the top of update_manifest.do_update(),
+    without exporting anything.
+    """
+
+    console.print("Checking the game server for a new manifest revision ...")
+    latest = ipom.fetch()
+
+    remote_revision = latest.revision.this
+    loaded_revision = manifest.revision.this
+    archived = archive_latest_revision(archive)
+    indexed = known_revisions()
+
+    table = Table(title="Revisions", box=box.ROUNDED)
+    table.add_column("Source", style="bold")
+    table.add_column("Revision", justify="right")
+    table.add_row("Game server (latest)", f"v{remote_revision}")
+    table.add_row("Currently loaded", f"v{loaded_revision}")
+    table.add_row("Local archive", f"v{archived}" if archived else "[dim]none[/dim]")
+    table.add_row("Wayback index", f"v{indexed[-1]}" if indexed else "[dim]none[/dim]")
+    console.print(table)
+
+    if remote_revision == loaded_revision:
+        console.print("[green]The loaded manifest is up to date.[/green]")
+        return None
+
+    console.print(
+        f"[yellow]A newer revision is available: "
+        f"v{remote_revision} (loaded: v{loaded_revision}).[/yellow]"
+    )
+    if ask_yn("Switch to the latest manifest now?", True):
+        return latest
+    return None
+
+
+def update_archive(archive: Path) -> Optional[ipom.PrideManifest]:
+    """
+    Runs update_manifest.do_update(), which exports the full manifest plus
+    one diff per past revision and then rebuilds the wayback object log.
+    """
+
+    script = load_update_script()
+    if script is None:
+        return None
+
+    indexed = known_revisions()
+    console.print(
+        Panel(
+            "update_manifest.do_update() exports [bold]v0000.json[/bold] (the "
+            "full manifest) plus one diff per past revision — "
+            f"{'roughly ' + str(indexed[-1]) if indexed else 'over a thousand'} "
+            "files totalling several GB — then rebuilds wayback_objects.json "
+            "by refetching every historical manifest.\n\n"
+            "[yellow]This is the upstream maintenance job, not a quick "
+            "refresh: expect a long run and heavy network use.[/yellow]",
+            title="Heads up",
+            box=box.ROUNDED,
+        )
+    )
+    if not ask_yn(f"Run it against '{archive}'?", False):
+        console.print("[dim]Cancelled.[/dim]")
+        return None
+
+    if not Path(WAYBACK_COMMITS_LOCAL).is_file():
+        console.print(
+            f"[yellow]{WAYBACK_COMMITS_LOCAL} is missing from the working "
+            "directory; run the downloader from the repository root.[/yellow]"
+        )
+        return None
+
+    archive.mkdir(parents=True, exist_ok=True)
+    marker = archive / "LATEST_REVISION"
+    if not marker.is_file():
+        marker.write_text("0")  # do_update reads this before anything else
+
+    try:
+        updated = script.do_update(archive)
+    except Exception as e:
+        console.print(f"[red]update_manifest.do_update() failed: {e}[/red]")
+        return None
+
+    if not updated:
+        console.print("[green]Already at the newest revision, nothing exported.[/green]")
+        return None
+
+    console.print(f"[green]Archive updated to v{archive_latest_revision(archive)}.[/green]")
+    if ask_yn("Load the freshly exported manifest?", True):
+        return ipom.load(archive / "v0000.json")
+    return None
+
+
+def rebuild_wayback_log(manifest: ipom.PrideManifest):
+    """Runs update_manifest.rebuild_log() against a complete manifest."""
+
+    script = load_update_script()
+    if script is None:
+        return
+
+    if not Path(WAYBACK_COMMITS_LOCAL).is_file():
+        console.print(
+            f"[yellow]{WAYBACK_COMMITS_LOCAL} is missing from the working "
+            "directory; run the downloader from the repository root.[/yellow]"
+        )
+        return
+
+    console.print(
+        "[yellow]rebuild_log() refetches every indexed historical manifest "
+        "and writes wayback_objects.json (tens of MB).[/yellow]"
+    )
+    if not ask_yn("Continue?", False):
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    if manifest.revision.base:  # a diff cannot seed the object list
+        console.print("Fetching the full latest manifest first ...")
+        manifest = ipom.fetch()
+
+    try:
+        script.rebuild_log(manifest)
+    except Exception as e:
+        console.print(f"[red]update_manifest.rebuild_log() failed: {e}[/red]")
+        return
+
+    console.print("[green]Wayback object log rebuilt.[/green]")
+
+
+def run_manifest_updates(
+    args: argparse.Namespace, manifest: ipom.PrideManifest
+) -> Optional[ipom.PrideManifest]:
+    """
+    Manifest maintenance menu, driven by update_manifest.py.
+    Returns a manifest to switch to, or None to keep the current one.
+    """
+
+    console.print("\n[bold underline]Manifest updates[/bold underline]")
+    console.print(
+        Panel(
+            "[1] Check for a new manifest revision\n"
+            "[2] Update the local archive (update_manifest.do_update)\n"
+            "[3] Rebuild the wayback object log (update_manifest.rebuild_log)\n"
+            "[0] Back",
+            title="update_manifest.py",
+            box=box.ROUNDED,
+        )
+    )
+
+    archive = Path(args.archive)
+    choice = ask("Select an option", "1")
+
+    if choice == "1":
+        return check_for_update(manifest, archive)
+    if choice == "2":
+        return update_archive(archive)
+    if choice == "3":
+        rebuild_wayback_log(manifest)
+        return None
+    if choice not in ("0", "b", "back"):
+        console.print("[red]Invalid choice.[/red]")
+    return None
+
+
 # ---------------- manifest handling ---------------- #
 
 
 def obtain_manifest(args: argparse.Namespace) -> ipom.PrideManifest:
-    """Fetch (and decrypt) the manifest, or load it from a local file."""
+    """Fetch (and decrypt) the manifest, or load it from a local file/archive."""
 
     if args.src:
         console.print(f"Loading local manifest from [cyan]{args.src}[/cyan] ...")
@@ -339,7 +642,8 @@ def obtain_manifest(args: argparse.Namespace) -> ipom.PrideManifest:
         Panel(
             "[1] Fetch the latest manifest from the game server (default)\n"
             "[2] Fetch a specific past revision (wayback history)\n"
-            "[3] Load a local manifest file (octocacheevai / .pdb / .json)",
+            "[3] Load a local manifest file (octocacheevai / .pdb / .json)\n"
+            "[4] Load from the local manifests/ archive (update_manifest.py)",
             title="Manifest source",
             box=box.ROUNDED,
         )
@@ -351,13 +655,33 @@ def obtain_manifest(args: argparse.Namespace) -> ipom.PrideManifest:
             console.print("Fetching and decrypting the latest manifest ...")
             return ipom.fetch()
         if choice == "2":
-            revision = ask_int("Revision number", 1)
+            indexed = known_revisions()
+            if indexed:
+                console.print(
+                    f"[dim]{len(indexed)} revisions indexed, "
+                    f"v{indexed[0]} to v{indexed[-1]}.[/dim]"
+                )
+            while True:
+                revision = ask_int("Revision number", indexed[-1] if indexed else 1)
+                if not indexed or revision in indexed:
+                    break
+                console.print(
+                    f"[yellow]v{revision} is not in the wayback index, "
+                    "so the fetch will most likely fail.[/yellow]"
+                )
+                if ask_yn("Try anyway?", False):
+                    break
             console.print(f"Fetching manifest revision v{revision} ...")
             return ipom.fetch(this_revision=revision)
         if choice == "3":
             path = ask("Path to manifest file", "octocacheevai")
             console.print(f"Loading and decrypting [cyan]{path}[/cyan] ...")
             return ipom.load(path)
+        if choice == "4":
+            manifest = load_from_archive(Path(args.archive))
+            if manifest is not None:
+                return manifest
+            continue
         console.print("[red]Invalid choice.[/red]")
 
 
@@ -668,6 +992,11 @@ def parse_args() -> argparse.Namespace:
         "--output", default="objects/",
         help="default output directory offered in prompts (default: objects/)",
     )
+    parser.add_argument(
+        "--archive", default=DEFAULT_ARCHIVE_PATH,
+        help="local manifest archive maintained by update_manifest.py "
+        f"(default: {DEFAULT_ARCHIVE_PATH}/)",
+    )
     return parser.parse_args()
 
 
@@ -693,6 +1022,7 @@ def main():
                 "[2] Selective download (models, spine2d, maps, props, npcs,\n"
                 "    accessories, ui, ... — optionally filtered by character)\n"
                 "[3] Export decrypted manifest (JSON / CSV / ProtoDB)\n"
+                "[4] Manifest updates (check / archive / wayback log)\n"
                 "[0] Quit",
                 title="Main menu",
                 box=box.ROUNDED,
@@ -706,6 +1036,12 @@ def main():
             run_selective_download(manifest, entries, args)
         elif choice == "3":
             run_export(manifest)
+        elif choice == "4":
+            switched = run_manifest_updates(args, manifest)
+            if switched is not None:
+                manifest = switched
+                entries = collect_entries(manifest)
+                show_summary(manifest, entries)
         elif choice in ("0", "q", "quit", "exit"):
             console.print("Bye!")
             return
